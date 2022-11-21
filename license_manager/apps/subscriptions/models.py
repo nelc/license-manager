@@ -918,6 +918,12 @@ class License(TimeStampedModel):
                     SegmentEvents.LICENSE_REVOKED,
                     event_properties)
 
+    def activate(self):
+        self.status = ACTIVATED
+        self.revoked_date = None
+        self.activation_date = localized_utcnow()
+        self.save()
+
     def unrevoke(self):
         """
         Moves a revoked license's status back to ASSIGNED and

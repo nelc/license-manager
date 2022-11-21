@@ -37,6 +37,9 @@ from license_manager.apps.api.tasks import (
     send_reminder_email_task,
 )
 from license_manager.apps.api_client.enterprise import EnterpriseApiClient
+from license_manager.apps.api_client.enterprise_catalog import (
+    EnterpriseCatalogApiClient,
+)
 from license_manager.apps.subscriptions import constants, event_utils
 from license_manager.apps.subscriptions.api import (
     execute_post_revocation_tasks,
@@ -531,6 +534,7 @@ class LicenseAdminViewSet(BaseLicenseViewSet):
 
         # Dedupe all lowercase emails before turning back into a list for indexing
         user_emails = list({email.lower() for email in request.data.get('user_emails', [])})
+        force_activation = request.data.get('force_activation', False)
 
         subscription_plan = self._get_subscription_plan()
 
@@ -560,10 +564,10 @@ class LicenseAdminViewSet(BaseLicenseViewSet):
                     return Response(response_message, status=status.HTTP_400_BAD_REQUEST)
 
                 user_emails_ex_revoked = self._reassign_revoked_licenses(
-                    user_emails, revoked_licenses_for_assignment,
+                    user_emails, revoked_licenses_for_assignment, force_activation
                 )
                 self._assign_new_licenses(
-                    subscription_plan, user_emails_ex_revoked,
+                    subscription_plan, user_emails_ex_revoked, force_activation
                 )
                 self._delete_unentitled_unassigned_licenses(
                     subscription_plan, len(revoked_licenses_for_assignment),
@@ -573,11 +577,12 @@ class LicenseAdminViewSet(BaseLicenseViewSet):
             logger.exception(error_message)
             return Response(error_message, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
         else:
-            self._link_and_notify_assigned_emails(
-                request.data,
-                subscription_plan,
-                user_emails,
-            )
+            if force_activation:
+                self._link_and_notify_assigned_emails(
+                    request.data,
+                    subscription_plan,
+                    user_emails,
+                )
 
         response_data = {
             'num_successful_assignments': len(user_emails),
@@ -625,34 +630,41 @@ class LicenseAdminViewSet(BaseLicenseViewSet):
         for unassigned_license in subscription_plan.unassigned_licenses[:num_to_delete]:
             unassigned_license.delete()
 
-    def _reassign_revoked_licenses(self, user_emails, revoked_licenses_for_assignment):
+    def _reassign_revoked_licenses(self, user_emails, revoked_licenses_for_assignment, force_activation=False):
         """
         Unrevoke licenses for user emails associated with previously revoked licenses.
         Returns a copy of the user_emails list with such emails removed.
         """
         user_emails_ex_revoked = user_emails.copy()
         for revoked_license in revoked_licenses_for_assignment:
-            revoked_license.unrevoke()
+            if force_activation:
+                revoked_license.activate()
+            else:
+                revoked_license.unrevoke()
+
             user_emails_ex_revoked.remove(revoked_license.user_email)
 
         return user_emails_ex_revoked
 
-    def _assign_new_licenses(self, subscription_plan, user_emails):
+    def _assign_new_licenses(self, subscription_plan, user_emails, force_activation=False):
         """
         Assign licenses for the given user_emails (that have not already been revoked).
         """
+        status = constants.ACTIVATED if force_activation else constants.ASSIGNED
+
         unassigned_licenses = subscription_plan.unassigned_licenses[:len(user_emails)]
         for unassigned_license, email in zip(unassigned_licenses, user_emails):
             # Assign each email to a license and mark the license as assigned
             unassigned_license.user_email = email
-            unassigned_license.status = constants.ASSIGNED
+            unassigned_license.status = status
             unassigned_license.activation_key = str(uuid4())
             unassigned_license.assigned_date = localized_utcnow()
             unassigned_license.last_remind_date = localized_utcnow()
+            unassigned_license.activation_date = localized_utcnow()
 
         License.bulk_update(
             unassigned_licenses,
-            ['user_email', 'status', 'activation_key', 'assigned_date', 'last_remind_date'],
+            ['user_email', 'status', 'activation_key', 'assigned_date', 'last_remind_date', 'activation_date'],
         )
 
         event_utils.track_license_changes(list(unassigned_licenses), constants.SegmentEvents.LICENSE_ASSIGNED)
@@ -946,11 +958,16 @@ class EnterpriseEnrollmentWithLicenseSubsidyView(LicenseBaseView):
                 self.validation_errors.append('notify')
         return self.request.data.get('notify')
 
-    @property
+    @cached_property
     def requested_course_run_keys(self):
         if self.request.data.get('course_run_keys'):
             if not isinstance(self.request.data.get('course_run_keys'), list):
                 self.validation_errors.append('course_run_keys')
+        elif self.requested_enterprise_id:
+            customer_agreement = utils.get_customer_agreement_from_request_enterprise_uuid(self.request)
+            enterprise_catalog_client = EnterpriseCatalogApiClient()
+            return enterprise_catalog_client.get_catalog_course_keys(customer_agreement.default_enterprise_catalog_uuid)
+
         return self.request.data.get('course_run_keys')
 
     @property
@@ -960,7 +977,7 @@ class EnterpriseEnrollmentWithLicenseSubsidyView(LicenseBaseView):
                 self.validation_errors.append('emails')
         return self.request.data.get('emails')
 
-    @property
+    @cached_property
     def requested_enterprise_id(self):
         return self.request.query_params.get('enterprise_customer_uuid')
 

@@ -8,7 +8,7 @@ class EnterpriseCatalogApiClient(BaseOAuthClient):
     API client for calls to the enterprise catalog service.
     """
     api_base_url = settings.ENTERPRISE_CATALOG_URL + '/api/v1/'
-    enterprise_catalog_endpoint = api_base_url + 'enterprise-catalogs/'
+    enterprise_catalog_endpoint = api_base_url + 'enterprise_catalogs/'
     distinct_catalog_queries_endpoint = api_base_url + 'distinct-catalog-queries/'
 
     def contains_content_items(self, catalog_uuid, content_ids):
@@ -49,3 +49,20 @@ class EnterpriseCatalogApiClient(BaseOAuthClient):
             self.distinct_catalog_queries_endpoint,
             json=request_data,
         ).json()
+
+    def get_catalog_course_keys(self, catalog_uuid):
+        endpoint = self.enterprise_catalog_endpoint + str(catalog_uuid)
+
+        def get_course_keys(url):
+            response = self.client.get(url).json()
+            course_keys = [
+                course['course_runs'][0]['key'] for course in response.get('results')
+                if course.get('content_type') == 'course' and course['course_runs']
+            ]
+
+            if response.get('next'):
+                course_keys += get_course_keys(response.get('next'))
+
+            return course_keys
+
+        return get_course_keys(endpoint)
