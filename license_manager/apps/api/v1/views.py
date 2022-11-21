@@ -577,7 +577,7 @@ class LicenseAdminViewSet(BaseLicenseViewSet):
             logger.exception(error_message)
             return Response(error_message, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
         else:
-            if force_activation:
+            if not force_activation:
                 self._link_and_notify_assigned_emails(
                     request.data,
                     subscription_plan,
